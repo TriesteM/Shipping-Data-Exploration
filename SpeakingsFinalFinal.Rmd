@@ -1,0 +1,699 @@
+---
+title: "Speaking Events Analysis"
+author: "Trieste Musial"
+date: "December 13, 2016"
+output:
+  html_document:
+    md_extensions: +escaped_line_breaks+hard_line_breaks
+    toc: yes
+  word_document:
+    md_extensions: +escaped_line_breaks+hard_line_breaks
+    reference_docx: Speakings2.docx
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE,autodep=TRUE,comment='',tidy.opts=list(width.cutoff=80),collapse=TRUE,fig.show='hold',messages=FALSE)
+```
+First, make sure you have all the **appropriate packages** installed \s
+and loaded to your R environment:
+```{r List_of_Libraries}
+libraries=c('Matrix','igraph','raster','geosphere','pastecs',
+            'boot','maps','stringr','ggmap','ggplot2','rgeos',
+            'rgdal','lubridate','zoo','date','rworldmap','sp',
+            'rpart','nlme','stats','graphics',
+            'grDevices','datasets','ks','formatR','kernSmooth',
+            'gdistance','spatstat','dbscan','factoextra','cluster',
+            'dendextend','dynamicTreeCut','TeachingDemos')
+```
+
+```{r LoadLibraries,echo=FALSE,results='hide',message=FALSE,warning=FALSE}
+lapply(libraries, require, character.only = TRUE)
+```
+## Basic Data Exploration and Organization
+\
+**Read in the data and pull out relevant info: We'll start with the data from 1851.**
+```{r Pull_in_Data}
+speaks=read.csv("1851.csv")
+sp1851=data.frame(
+  dateSpeak=as.Date(speaks$Speak_Date,
+                    format="%d.%m.%Y"),
+  lat=speaks$Ship_Latitude,
+  long=speaks$Ship_Longitude)
+```
+We've created a dataframe of our dates and their lat/long coords.
+```{r Look_at_Data}
+head(sp1851)
+```
+\
+**Check for missing data and mixed-up data.**
+Make sure the locations columns only contain numbers:
+```{r DataCheck,comment='',collapse=TRUE}
+class(sp1851$long)
+class(sp1851$lat)
+```
+How much data do we have?
+```{r MissingData,comment='',collapse=TRUE}
+length(na.omit(sp1851$dateSpeak)) #1268 dates
+length(na.omit(sp1851$lat))  #only 1116 locations
+```
+How many that have both dates and locations?
+```{r MissingData_Removed,comment='',collapse=TRUE}
+nrow(na.omit(sp1851)) #992
+sp1851=na.omit(sp1851) #remove all with missing data
+```
+Make sure there's nothing unexpected in our date columns:
+```{r Data_Check2, comment='',collapse=TRUE}
+unique(year(sp1851$dateSpeak)) 
+```
+What timespan are we looking at?
+```{r Timespan,comment='',collapse=TRUE,warning=FALSE,message=FALSE}
+#create an interval object:
+interval1851=interval(range(sp1851$dateSpeak,na.rm=TRUE)[1],
+                      range(sp1851$dateSpeak,na.rm=TRUE)[2])
+
+#how many days are in this interval?
+interval1851/days(1) #444 days
+#how many months are in this interval?
+interval1851/months(1) #14.64516, or:
+interval1851 %/% months(1) #14 months and
+as.period(interval1851 %% months(1)) #20 days
+```
+\
+**Basic visualization of speakings through time.**
+Histograms to show how the data are distributed across the years, \s
+months, and weeks.
+```{r Histograms,comment='',fig.show='hold',warning=FALSE,message=FALSE,fig.width=3,fig.height=3,collapse=TRUE}
+#figure out where the breakpoints are for
+#the different approaches to dividing time:
+histinfo.yrs=hist(sp1851$dateSpeak,breaks='years',
+                  right=FALSE,
+                  plot=F,format='%Y')
+histinfo.mths=hist(sp1851$dateSpeak,breaks='months',
+                   right=FALSE,
+                   plot=F,format='%Y')
+histinfo.wks=hist(sp1851$dateSpeak,breaks='weeks',
+                  start.on.monday=FALSE,
+                  right=FALSE,format='%Y',
+                  plot=F)
+
+#per year
+hist(sp1851$dateSpeak,breaks='years',col='dark red',freq=T,
+     main='Speakings per Year',xlab='',ylab='',ylim=c(0,900),
+     right=FALSE,axes=F)
+axis(side=1,at=c(min(histinfo.yrs$breaks),
+                 histinfo.yrs$mids,
+                 max(histinfo.yrs$breaks)),
+     labels=c('',1850,1851,''))
+axis(side=2)
+
+#per month
+hist(sp1851$dateSpeak,breaks='months',col='dark red',freq=T,
+     main='Speakings per Month',xlab='',ylab='',format='%Y',
+     right=FALSE,axes=F,ylim=c(0,400))
+axis(side=1,at=histinfo.mths$breaks,labels=FALSE,tcl=-0.5)
+text(x=as.Date(histinfo.mths$breaks),
+     labels=c("1850",rep("",11),"1851",rep("",3)),
+     par("usr")[3]-20,cex=1,xpd=TRUE,pos=1,offset=0.55)
+axis(side=2,at=seq(0,400,by=100))
+#label x-axis where we transition from one year to another:
+break1850=min(which(as.numeric(
+  format(as.Date(histinfo.mths$breaks),'%Y'))==1850))
+#label first incidence of 1850
+break1851=min(which(as.numeric(
+  format(as.Date(histinfo.mths$breaks),'%Y'))==1851))
+#label first incidence of 1851
+abline(v=c(
+  histinfo.mths$breaks[break1850],
+  histinfo.mths$breaks[break1851]),
+  lwd=0.75,lty=5)
+
+#per week
+hist(sp1851$dateSpeak,breaks='weeks',col='dark red',freq=T,
+     start.on.monday=FALSE,
+     main='Speakings per Week',xlab='',ylab='',
+     right=FALSE,ylim=c(0,125),axes=FALSE)
+#label x-axis where we transition from one year to another:
+break1850=min(which(as.numeric(
+  format(as.Date(histinfo.wks$breaks),'%Y'))==1850))
+break1851=min(which(as.numeric(
+  format(as.Date(histinfo.wks$breaks),'%Y'))==1851))
+labels.wks=cbind(
+  at=as.Date(histinfo.wks$breaks),
+  labels=c('1850', #label first incidence of 1850
+           rep('',length((break1850+1):(break1851-1))),
+           '1851', #label first incidence of 1851
+           rep('',length((break1851+1):length(histinfo.wks$breaks)))
+           ))
+abline(v=c(
+  histinfo.wks$breaks[break1850],
+  histinfo.wks$breaks[break1851]),
+  lwd=0.75,lty=5)
+axis(side=2,at=seq(0,125,by=25))
+axis.Date(side=1,at=as.Date(histinfo.wks$breaks),labels=FALSE,tcl=-0.25)
+text(x=as.Date(histinfo.wks$breaks),
+     labels=labels.wks[,'labels'],
+     par("usr")[3]-10,cex=1,xpd=TRUE,pos=1,offset=0.55)
+```
+\
+**Remove any points located on land.**
+Generate a spatial object using data point locations.
+```{r SpatialPoints,comment='',fig.show='hold',warning=FALSE,message=FALSE,collapse=TRUE}
+coords=cbind(lon=sp1851[,'long'],lat=sp1851[,'lat'])
+samplesSPxy=SpatialPointsDataFrame(coords,data=sp1851,
+                                   proj4string=CRS("+init=epsg:4326"))
+```
+Get points onto a map of the world.
+```{r WorldMap,comment='',fig.show='hold',warning=FALSE,message=FALSE,collapse=TRUE}
+world=getMap()
+world.xy=spTransform(world,CRS(proj4string(samplesSPxy))) 
+#need to be in same projection
+
+plot(world.xy,col='dark gray',border=FALSE)
+points(samplesSPxy,col='dark red',pch=16,cex=0.5)
+box('plot',col='black')
+```
+Determine which points are on land, subset away those samples that are.
+```{r LandPoints,comment='',fig.show='hide',warning=FALSE,message=FALSE,collapse=TRUE}
+dontwant=samplesSPxy[world.xy,]
+dowant=gDifference(samplesSPxy,dontwant) #gDifference strips the data table
+
+#for some reason the indices aren't coming forward, 
+#so I can't simply subset samplesSP by matching index, so the relevant
+#data will have to be extracted kind of tediously and added
+#to dowant
+
+#the data that we DO want are those rows in the data table that
+#are NOT in dontwant:
+spxy=as.numeric(rownames(samplesSPxy@data)) #rows in our data
+donrn=as.numeric(rownames(dontwant@data)) #rows that we don't want
+dowant.indices=(1:nrow(samplesSPxy@data))[!spxy %in% donrn]
+rm(spxy,donrn)
+dowant=samplesSPxy[dowant.indices,]
+plot(world.xy,col='dark gray',border=FALSE)
+points(dowant,col='dark red',pch=16,cex=0.5)
+box('plot',col='black')
+
+samplesSPxy=dowant #for consistent naming
+```
+Project all spatial objects to a planar projection system.  Choosing a projection that minimizes distortion of distances, especially along a north/south line:  EPSG:32663, an Equidistant Cylindrical projection.
+```{r Project,comment='',fig.show='hold',warning=FALSE,message=FALSE,collapse=TRUE}
+#spatial map to work with:
+proj4string(samplesSPxy)
+proj4string(world.xy)
+samplesSP=spTransform(samplesSPxy, CRS("+init=epsg:32663"))
+world.sp=spTransform(world,CRS(proj4string(samplesSP)))
+plot(world.sp,col='dark gray',border=FALSE)
+points(samplesSP,col='dark red',pch=16,cex=0.5)
+box('plot',col='black')
+#projection checks out--our points are still on the map!
+```
+
+
+## Spatial Analyses--Hypothesis Tests
+\
+**Will start with basic tests for complete spatial randomness (CSR)**
+Generate a new type of spatial object--a "point pattern," or ppp.
+```{r pppObject,comment='',fig.show='hide',warning=FALSE,message=FALSE,collapse=TRUE}
+#need a ppp version of data:
+samplesPPP=as(samplesSP,"ppp")
+summary(samplesPPP) 
+
+#average intensity  2.23483e-12 points per square unit (meters)
+```
+\
+**Test for CSR using the k-function.**
+The K function, $\hat K(r) = \frac{1}{\lambda^2A} \sum_{i=1}^n \sum_{j \neq i}^nI_r(r_{ij})$, where \(A\) is the study area, \(\lambda\) is the intensity (or the number of Speaking events divided by the area of our study), \(r\) is the distance from point \(i\) (\(j\) is all points other than \(i\)), and \(I_r\) is an indicator function that takes on a value of 0 if point \(j\) is not within distance \(r\) of \(i\) and a value of 1 otherwise. Essentially, we are tallying all points within incremental distances of \(i\). When points are distributed randomly, the expected number of points in any given area is simply \(\lambda\) multplied by the area in question.  Strong departures from this pattern can indicate clustering of a point pattern (more neighbors than expected at given neighborhood sizes) or over-dispersion (fewer neighbors than expected at given neighborhood sizes).
+```{r CSR,comment='',fig.show='hide',warning=FALSE,message=FALSE,collapse=TRUE,fig.width=8,fig.height=8}
+basicCSR=envelope(unmark(as.ppp(samplesPPP)),
+                  fun=Kest,nsim=99,
+                  savepatterns=TRUE,
+                  do.pwrong=TRUE,
+                  fix.n=TRUE,verbose=FALSE)
+#^^^estimates K function for the spatial distribution of our samples
+```
+A simulation 'envelope' allows us to visualize how much and in what direction our samples are out of CSR: Random spatial point patterns are simulated *nsim* (99 in our case) times. The maximum and minimum of \(K\) (across all simulations) set the limits that we will compare to our empirical data.
+```{r Kest,comment='',fig.show='hold',warning=FALSE,message=FALSE,collapse=FALSE,fig.width=8,fig.height=8}
+summary(basicCSR)
+plot(basicCSR,main='Kest')
+```
+Our observed values are waaaaaaay out of the limits--much higher at (nearly) every value of r (r is in meters).  The rate of increase of our observed \(K(r)\) does begin to slow down at very high values of \(r\)--around 15000000 meters.
+```{r Kest_GoF,comment=NA,fig.show='hold',warning=FALSE,message=FALSE,collapse=TRUE,fig.width=8,fig.height=8}
+#we can still do a goodness-of-fit test:
+madCSR=mad.test(basicCSR,verbose=FALSE)
+madCSR # p-value = 0.01
+#yep, just like the plot demonstrates, there
+#is significant deviation from the distribution
+#that would be expected under randomness
+```
+\
+**Test for CSR using the F-function.**
+The F-function essentially measures the average *space* between events, the empty space.  The empty space around a given point should increase asymptotically as we view the point within larger spaces--as long as the distribution of points is random/homogeneous, that is.  
+```{r Fest,fig.width=8,fig.height=8}
+basicCSR.F=envelope(unmark(as.ppp(samplesPPP)),fun='Fest',nsim=99,savepatterns=TRUE,
+                    do.pwrong=TRUE,fix.n=TRUE,verbose=FALSE)
+plot(basicCSR.F,main='Fest')
+```
+The leveling out of the expected \(F(r)\) you see at medium \(r\) values reflects the expectation that at a sufficiently large distance class, our search radius is large enough to contain all points in the observed area.  Our observed \(F\) is consistently much lower than the expected \(F\) under randomness (more evidence for *clustering*), but notice that it is increasing constantly across all values of \(r\).
+\
+**Test for CSR using the Pair Correlation Function.**
+The PCF, or 'pair correlation function,' is a measure of point density within rings of radius \(r\). It can be considered as the ratio of density at a given distance to the total average density--under expectations of CSR, \(g(r)\) is 1. When \(g(r)>1\), more points than expected are found at specified distance class \(r\).
+```{r PCF,fig.width=8,fig.height=8}
+pcf=pcf(unmark(as.ppp(samplesPPP)))
+plot(pcf)
+```
+We can see here that mean densities in areas of size to ~1,500,000m are 10 to 40 times larger than the overall/average density (which is approximated as \(r\) approaches the total area.
+```{r PCFzoom,fig.width=8,fig.height=8}
+plot(pcf,xlim=c(0,2000000))
+```
+\
+**Test for CSR while allowing for nonstationarity in the point distribution.**
+Data points that are distributed with spatially varying intensity will fail tests of CSR--however, this doesn't mean that those points necessarily show "clustering," it might be as simple as density across the area varying regularly.  We can test for CSR using a model that allows for regular variation in density.
+```{r Kinhom}
+K.HP=Kinhom(unmark(as.ppp(samplesPPP))) #modified K-function that allows nonstationarity
+pcf.HP=pcf(K.HP,method='c',spar=0.5)
+
+plot(pcf.HP)
+plot(pcf.HP,xlim=c(0,50000))
+```
+The detected departure from CSR still holds when we allow density to vary systematically across the sample area.
+
+
+## Spatial Analyses--Modeling Hotspots
+\
+**Modeling the intensity of points across space using kernel density estimation.**
+We can visualize the degree of inhomogeneity in the dataset by estimating the (smoothed) intensity of points across space.  Kernel density estimation (KDE) is a non-parametric way to estimate the probability density function of a random variable--makes no assumption about an underlying distribution.  Instead, the underlying distribution is built from kernel functions centered at each data point. The density estimate is an aggregation of all kernel functions on our point pattern.  A smoothing parameter, or bandwidth, determines the width of the kernel functions and their degree of overlap in space.
+```{r Ksmooth_sigma}
+xy_points=coordinates(samplesSPxy)
+b2=Hpi(xy_points,binned=TRUE,pilot='samse',pre='scale')
+#estimate optimal bandwidth
+
+kernSmooth.kde=kde(xy_points,
+                   H=b2,
+                   gridsize=c(400,400),
+                   compute.cont=TRUE)
+#kernel density estimate with fixed bandwidth
+
+```
+Here we're computing a "fixed-badwidth kernel estimate" of the intensity function of the process that generated our observed point pattern.  We used a cross-validation method to determine our optimal bandwidth.
+```{r Ksmooth_plot}
+#transform kde object to raster and clean up 
+worldR=raster(nrows=900,ncols=900)
+worldR=rasterize(spTransform(world.xy,CRS(proj4string(worldR))),
+                 worldR,field='LEVEL',fun='sum')
+worldR=projectRaster(worldR,crs=CRS(proj4string(world.xy)))
+worldR[is.na(worldR)]=1
+worldR[worldR>1]=NA
+
+grid.kde=raster(kernSmooth.kde)
+proj4string(grid.kde)=proj4string(worldR)
+grid.kde=extend(grid.kde,worldR,value=0)
+plot(world.xy,col='dark gray',border=FALSE)
+plot(grid.kde,col=rev(heat.colors(15,alpha=1)),
+     legend=FALSE,xlab='',ylab='',
+     legend.shrink=0.45,
+     box=FALSE,add=TRUE,
+     legend.args=list(text='',
+                      side=1,font=2,line=3.5,cex=0.7))
+plot(world.xy,col='dark gray',border=FALSE,add=TRUE)
+title(main='Point Intensity, 1850 to 1851',line=1,cex=0.75)
+```
+We can see that there are some rather abrupt transitions from low-intensity to high-intensity, AND that there's no obvious higher-order distribution
+of these changes most of the world is low-density
+
+
+## Spatial Analyses--Modeling Spatial Clusters
+\
+
+**Modeling Spatial Clusters with K-Means Clustering.**
+
+```{r K-means_chooseK,fig.width=5,fig.height=5}
+#algorithmically choose the optimal value of k:
+
+fviz_nbclust(coordinates(samplesSP),
+             kmeans,method="wss",
+             k.max=20,
+             print.summary=TRUE) +
+  geom_vline(xintercept=5,linetype=2)
+#The location of a bend (knee) in the plot is considered  
+#an indicator of the appropriate number of clusters.
+#k-means process works to minimize mean squared error
+#I would say k=5, that's really where any further
+#increase of k stops reducing SoS (note the flat line
+#from k=5 to k=6)
+```
+With k-Means clustering, the optimal *k* is one that minimizes the mean squared error (MSE) of the partitions, or the mean of the distances separating points within a cluster from the cluster's centroid. Obviously, increasing the number of clusters *k* will always decrease MSE--the more clusters, the smaller they are, and the shorter the distances between their centroids and the points assigned to them.  A *useful* *k*, then, will have a relatively larger effect on MSE than the *k* larger than it.  Here, we see that our best bet for *k* is at \(k=5\)--at values greater than 5, we see only minimal decreases in MSE.
+```{r K-means_chooseK-sil,fig.width=5,fig.height=5}
+#it's a bit ambiguous, so we'll try multiple methods:
+fviz_nbclust(coordinates(samplesSP),
+             kmeans,method="silhouette",
+             k.max=20)
+#The optimal number of clusters k is the one that maximize 
+#the average silhouette over a range of possible values for k
+#suggests 5
+```
+An alternative method of identifying optimal *k*, 'Silhouette Analysis' measures how close each point in one cluster is to the points in neighboring clusters.  It's essentially a measure of separation distance between the clusters that result at each *k*.  A good set of partitions will be very dissimilar from each other while containing individuals that are very similar.  We see here that the rate of change in silhouette coefficients across *k* decreases at \(k=5\).
+```{r k-meansMaps, collapse=FALSE}
+#run the algorithm
+km.1851=kmeans(coordinates(samplesSP),5,nstart=500,iter.max=999)
+
+km.1851$size #note that the clusters aren't really similar in size
+
+km.1851$centers #the centroid locations
+
+samplesSP$kMean5=km.1851$cluster
+plot(world.sp,col='dark gray',border=FALSE,
+     main='Spatial Clusters, 1850 to 1851',
+     sub='K-means with k=5')
+points(samplesSP,col=samplesSP$kMean5,pch=16,cex=0.5)
+```
+\
+**Modeling Spatial Clusters with Hierarchical Clustering.**
+```{r Dendrogram, collapse=FALSE}
+euc.Dists=dist(coordinates(samplesSP),method='euclidean') #get our dissimilarity matrix
+fitward=hclust(euc.Dists,method='complete') #generate the bifurcating tree
+hcd=as.dendrogram(fitward)
+
+coph=cophenetic(fitward)
+cor(euc.Dists,coph) #0.8204107 good!
+```
+We can assess how closely our tree distance represents our dissimilarity matrix by estimating the cophenetic correlation coefficient.  Our tree space shows a strong correlation with Euclidean space.  Additionally, We can use an adaptive tree-pruning approach to determine the number of clusters in our tree. 
+```{r Dendrocut}
+dynamoTree=cutreeHybrid(dendro=fitward,
+                        distM=as.matrix(euc.Dists),
+                        verbose=FALSE) #detect clusters
+
+unique(dynamoTree$labels) #chooses 6 clusters
+```
+Algorithmic cluster detection identifies 6 clusters (based on the height differences along tree branches as well as the proximity of individuals within a cluster to the cluster mediod).
+```{r DendroTree}
+#Show the clusters on the tree:
+samplesSP$hierarch=dynamoTree$labels
+dendro.cols2=samplesSP$hierarch[fitward[['order']]]
+dendro.cols2=palette()[dendro.cols2] #showing the cuts on a dendrogram
+hcd.hier=as.dendrogram(fitward)
+labels_colors(hcd.hier)=dendro.cols2
+plot(hcd.hier)
+```
+
+```{r DendroSPace}
+#Plot the cluster assignments in space:
+plot(world.sp,col='dark gray',border=FALSE,
+     main='Spatial Clusters, 1850 to 1851',
+     sub='Hierarchical Clustering, k=6')
+points(samplesSP,col=samplesSP$hierarch,pch=16,cex=0.5)
+```
+
+\
+Using both the shape of our hierarchical tree and our dissimilarity matrix, we've detected six clusters.  Some of the advantage in hierarchical clustering is the ability to identify *hierarchical groups*, or nested clusters.  Our bifurcating tree is characterized by four higher-level groups:  One small one is the blue partition, an outlier that shows no deeper similarities with our other partitions--this makes sense when we consider its position in space.  The black partition forms a large group, and the teal, red, and purple clusters can be lumped into a third group. The green group is not quite the outlier that the blue group is, but its tree shape (as well as its geographic location) does indicate a relative lack of deeper similarities.
+\
+**Modeling Spatial Clusters with Density-Based Clustering.**
+
+```{r dbscan_chooseEps}
+kNNdistplot(euc.Dists,k=6) #locate optimal neighborhood size for a given value of k
+abline(h=600000,lty=2)
+```
+An optimal neighborhood size for *k* number of clusters can be identified as the distance separating the *kth*-nearest neighbors of core points--for example, if we set \(k=2\), we find our neighborhood size at the average distance between all core points and their 2nd-nearest neighbor.  Border points and outlier points are expected to have neighbors at greater distances, and so by focusing on core points we can identify the distance at which homogeneity breaks down.
+
+\
+Here we can see that at \(k=6\), our optimal neighborhood size is about 600 kilometers.
+```{r dbscan_clusters}
+dbscan1=dbscan(euc.Dists,eps=600000,minPts=5)
+dbscan1 #finds 9 clusters
+#that was kind of a huge neighborhood size (600k km)
+plot(world.sp,col='dark gray',border=FALSE,
+     main='Spatial Clusters, 1850 to 1851',
+     sub='Density-based Clustering, Eps=600km, MinPts=5')
+points(samplesSP,col=dbscan1$cluster+8,pch=16,cex=0.5)
+```
+
+\
+Density-based clustering has identified nine clusters ranging in size from 3 to 782 points.  69 individuals were classified as outliers or "noise."  
+<br />
+
+##Comparison of Spatial Clusters Modeling
+
+The overarching goal of data clustering is to group samples into *k* partitions using similarity among individuals.  A good set of partitions will be very dissimilar from each other, and will contain individuals that are quite similar.  When we use Euclidean distance as our measure of similarity, we generate clusters that are characterized by the among- and within-group variation in inter-point distances.
+<br />
+The three different clustering algorthims we used, *k-Means*, *hierarchical*, and *density-based*, differ in two fundamental ways: how they are parameterized and how they construct partitions.  Underlying these differences are the asumptions inherent to each model, and their suitability for different data.
+<br />
+**K-Means** clusters are parameterized by the choice of *k*.  The algorithm begins by generating *k* points, which are used as centroids of *k* clusters.  In the "assign" step, each point is assigned cluster membership to its closest centroid.  This is followed by an "update" step, where each centroid is updated to become the mean of all the samples that are assigned to its cluster.  Note that this update can change the point assignments; if a point was assigned to a centroid that moved, that point may now need to be assigned to a different centroid.   These iterations continue until some stop criteria are met--generally, the algorithm stops when the centroid means have stabilized and no points are reassigned to new clusters.  Another point to note about this is that the initial placement of the *k* centroids is random--and if they happen to be badly placed, the k-Means algorithm converges on a subpar solution.  The assumptions underlying the *k-Means* approach are in general:  that there *are* exactly *k* clusters, chosen by the user--the shape of the clusters is not informed by the distribution of the data, and in fact is assumed to be spherical.  Additionally, the *k-Means* algorithm assumes that all clusters have the same number of points, so convergence will aim for partitions that are equal in population.  Similarly, as it relies on the minimization of MSE for partition assignment, *k-Means* doesn't allow for unequal distribution of density among the partitions, but assumes all clusters have equal density.  This makes it particularly sensitive to the presence of outliers in the data.
+<br />
+We can see the outcome of these assumptions in our results:  All of our clusters include points that don't really appear suitably assigned, as they're located relatively far from their cluster center and exhibit obviously different density than the inner regions of their clusters--these points seem mis-assigned.  Most importantly, the partitions drawn by *k-Means* don't contain any obvious value in information; boundaries between these clusters reflects neither national borders nor oceanic.  We saw that the clusters generated by our *k-Means* algorithm violated some of the assumptions of this model, implying the inappropriateness of applying this model to our data.  First, the *k-Means* clusters are unequal in size.  Additionally, we can see a degree of anisotropy in the spatial distribution of our points--there is a north/south axis through the Atlantic Ocean that has a large number of points, as well as two east/west lines of points wrapping around the southern hemisphere.  Our clusters are not spherical.  Finally, the fact that *k* has to be set *a priori* necessarily limits the utility of this model.  All of these together suggest that *k-Means* is not the ideal approach to partitioning these data.
+<br />
+The **hierarchical clustering** method utlizes more information contained within the data than does the *k-Means* algorithm.  Agglomerative hierarchical clustering analyses begin with \(k=n\) clusters, where *n* is the number of sample points in our data set.  Each point is assigned to its own cluster with a population of 1.  At each step in the algorithm, the two most similar clusters are merged.  The algorithm stops when there is one single cluster containing all samples--from that cluster a bifurcating tree, or "dendrogram", emerges.  Clusters are then defined by pruning branches off the dendrogram, and are often chosen for their utility to the researcher--how well they describe a partitioning of interest. Algorithmic identification of clusters is possible, however (and was utilized here), where clusters are iteratively built based on tree shape and the distribution of clusters' member points around the cluster mediod. *Hierarchical clustering* requires no *a priori* choice of the number of clusters defining the data, and because these clusters aren't limited in scope and shape by assumptions of equal variance among clusters, its choices will not be skewed by the presence of outliers.  
+<br />
+While the hierarchical approach does offer extra insight in its ability to identify clusters, its algorithm is deterministic--information gained at forward steps in the algorithm's chain is not used to update decisions made at earlier steps.  These algorithms can perpetuate inaccurate conclusions from early in the chain with potentially serious effects on the tree's final shape.  It's important when using this method to verify its findings with your own knowledge of the system.  We can see in our results that our *hierarchical clustering* method identified clusters with more apparent sensitivity to spatial variation in density than did *k-Means*--with this method, our *k*=6 clusters are partitioned into distinct areas that with clear density differences, which is useful for identifying regions that may drive speakings events.  Furthermore, these partitions reflect distance from continents and oceanic boundaries; more meaningful distinctions than the clusters identified with *k-Means*.  However, validation of these clusters is up to the user, as there's no concrete statistical or theoretical foundation for the clustering.
+<br />
+An approach that incorporates the sensitivity of *hierarchical clustering* as well as a firm statistical foundation, **density-based clustering** identifies dense regions in the data space that are separated by regions of low density.  Clusters modeled with density-based clustering can take any shape and are not forced into groups with similar density distributions, but the user has to define two key parameters to run the model: the distance that will define a neighborhood, and the minimum number of points that are required to identify core areas of density within a neighborhood.  Importantly, and unlike our previous models, density-based clustering methods will assign individuals to 'no cluster' if they aren't near enough to the center of a neighborhood.  Basically, a density-based cluster is built from a single point:  An initial point is identified, and its distances from all other points in the data set are calculated.  If it has more than a minimum threshold of points within a minimum distance (the two parameters set *a priori*), it, and all points within that minimum distance, are assigned to a cluster.  Within that cluster, all points that satisfy the conditions of minimum neighbors within minimum distance are considered *core* points--they make up the cluster's interior of high density.  Points that are within the minimum distance of a core point but that do *not* have the requisite near neighbors are considered *border* points.  *Noise* points are the outliers--they meet neither requirement for cluster assignment.  In this way, the boundary of a cluster is identified at areas that lack core points.
+<br />
+As you can see from our density-based clustering map, this method yields a fairly monotonous landscape, despite its identification of an increased number of clusters.  Though this method partitions nine groups, they are largely dominated by a single group in the center of our point pattern.  We identify 69 outlier points with this method, shown in gray on our map--cluster boundaries drawn with this model are much sharper than they appeared with our previous models, in large part due to these outlier points not being forced into cluster assignment. Within this framework, the Speaking events located near the center of the Atlantic Ocean are considered an homogeneous group.  Nearly all other groups identified by this method are clustered near coastlines.  These delineations make intuitive sense for a data set of shipping communication--spatial patterns of communication could reasonably be expected to be driven by variables like ocean depth and current, and distance to shipping ports. The result of this clustering method make a great deal of sense for these data--I could easily imagine that ship-to-ship communication at sea is often a function of density, as news of trade routes spreads faster the more ships are in communication.  
+<br />
+
+```{r ClustCompare, echo=FALSE}
+plot(world.sp,col='dark gray',border=FALSE,
+     main='Density-based Clustering,
+     Eps=600km,
+     MinPts=5',
+     cex.main=0.65)
+points(samplesSP,col=dbscan1$cluster+8,pch=16,cex=0.5)
+plot(world.sp,col='dark gray',border=FALSE,
+     main='Hierarchical Clustering,
+     k=6',
+     cex.main=0.65)
+points(samplesSP,col=samplesSP$hierarch,pch=16,cex=0.5)
+
+```
+
+Of the three methods, *hierarchical* and *density-based* offer the most information about the processes that might be driving our spatial point patterns.  Both methods identified clusters that appear to be associated with external information--the presence of coastlines and what might be assumed to be the distribution of shipping routes and differing weather patterns across oceans.  The ability of *density-based clustering* to identify outliers (or rather, its lack of an assumption that all points must be assigned cluster membership), makes this model especially suitable for these data--we clearly have many (our density-base algorithm identified nearly 70) speaking events that shouldn't be placed on a distinct network with the others.  However, this method obscures information near the center of our points.  Where *hierarchical clustering* identified two distinct, large clusters in the middle of the Atlantic Ocean, *density-based* clustering found a single conglomerate.  This difference lies in the fact that *density-based clustering* partitions at areas with a significant drop in point density--however, what constitutes that "significant drop" is defined by the user with their choice of a mimimum number of points within a specific span.  The chosen parameters can easily be wrong--we were able to optimize "minimum span," but only for a given number of *k* clusters, which we chose based on the loose agreement of *k* between our *k-Means* and *hierarchical clustering* algorithms (while we chose a *k* of 5 for *k-Means*, a *k* of 6 was nearly as appropriate for that method, and was in agreement with the *k*-value identified by *hierarchical clustering*).  The increased granularity of our hierarchical method reflects the algorithm's agglomerative approach--clusters reflect nested relationships defined by pairwise distances between points.  Partitions are drawn wherever a group can be seen to share a deep split from the rest of the data--membership is based entirely on the distribution of shared relationships and not at all forced by external, and possibly incorrect, parameters.  Our *density-based clustering* found many more small clusters compared to our hierarchical method.  These clusters have the benefit of being grounded in statistical significance (unlike our clusters identified via *hierarchical clustering*), however they appear to be less useful in identifying underlying process (thought that of course depends on the underlying processes we are trying to describe with these methods).
+<br />
+Increasing the number of clusters we use to try to identify the optimal neighborhood size in *density-based clustering* yields even fewer clusters identified by the actual algorithm, and ultimately the clusters chosen are even *less* useful in terms of the patterns they identify (and, directly, less useful in terms of the underlying processes they might describe).
+```{r chooseEpsatk7}
+kNNdistplot(euc.Dists,k=7) #locate optimal neighborhood size for a given value of k
+abline(h=1000000,lty=2)
+
+dbscan2=dbscan(euc.Dists,eps=1000000,minPts=5)
+dbscan2 #finds 5 clusters
+plot(world.sp,col='dark gray',border=FALSE,
+     main='Spatial Clusters, 1850 to 1851',
+     sub='Density-based Clustering, Eps=600km, MinPts=5')
+points(samplesSP,col=dbscan2$cluster,pch=16,cex=0.5)
+```
+<br />
+The statistical foundation of *density-based clusteirng* makes this choice an obvious preference to *hierarchical clustering*, however the number of clusters ultimately identified is extremely sensitive to the chosen parameters.  Most importantly, for these data, the clusters identified with our density-based method don't appear to contain as much useful information as the clusters identified with our hierarchical method.  Ultimately, the best approach to these data might emphasize the clusters identified by *hierarchical clustering* while still allowing the outliers identified via *density-based clustering* to retain their "non-identity."  
+
+```{r DistOutliersDensBased}
+euc.Dists=dist(coordinates(samplesSP),
+               method='euclidean') 
+
+distsamps=coordinates(samplesSP)
+rownames(distsamps)=1:nrow(distsamps)
+plot(distsamps,col=dbscan1$cluster+8,
+     pch=samplesSP$hierarch,cex=0.5)
+legend('topright',pch=sort(unique(samplesSP$hierarch)),
+       legend=paste('Cluster',
+                    sort(unique(samplesSP$hierarch)),
+                    sep=''),
+       title='Hierarchical Clusters')
+samplesSP$dbBased=dbscan1$cluster
+
+```
+We identified 6 clusters hierarchically, and 9 clusters using a density-based method.  A major difference between the two results is that hierarchical clustering identifies two distinct clusters within the density-based method's single, large "black" cluster.  The density-based method is demonstrating that there's no "significant drop" in density among these individuals, but the hierarchical method is demonstrating that there is a major change in the distribution of pairwise distances at its identified partition.  Whether this change in pairwise distances is *important* is to be determined by the research questions and the desired story to be extracted from the data.  All we can say is that the change in density at that partition isn't significant with the parameters we used.
+<br />
+Additionally, here we can more clearly see the importance of not forcing points to assign to specific clusters--gray symbols on this map are those points that were identified as outliers by the density-based method.
+
+```{r HierOutliers}
+plot(world.sp,col='dark gray',border=FALSE)
+points(samplesSP,
+     col=ifelse(samplesSP@data$dbBased==0,8,samplesSP@data$hierarch),
+     pch=16,cex=0.5)
+```
+Allowing the outlier designations into our hierarchical clustering assignments shows areas where point density has significantly decreased. These areas do still tend to occur at partitions identified by hierarchical clustering--the outlier detection of density-based clustering is one of its biggest selling points.  However, the usefulness and reasonability of the clusters identified by the more data-informative method of the hierarchical clustering method makes the hierarchical method the best method explored with these data.  
+<br />
+Ultimately, the major differences in outcome between these clusterin methods come down to their assumptions and their methods:  *K-means* identified *k=5* clusters that are based on simply identifying individuals within a specified *radius* from some arbitrary center point.  These clusters do not appear to be very useful in terms of their reflection of underlying processes, though we can say that the partitions themselves are statistically meaningful.  *Hierarchical clustering* identified *k=6* clusters based on the identification of groups that can be described by pairwise distances that are shorter than the distance between the group and other groups.  These clusters *do* reflect obvious geographic information, such as the division of oceans and the distribution of coastlines, but are limited in their inferential value by the fact that they're not underscored by any valid statistical significance.  *Density-based clustering* identified *k=9* clusters based on the distribution of variance in point density across our space.  These clusters seem almost too numerous to be very useful, however the algorithm has the ability to prevent points from being artificially assigned to *some* cluster, allowing for further inference based on a more information-rich set of clusters.  Clearly, these density-based outliers are meaningful within the context of our hierarchical clusters, as their distribution generally lines up with partitions drawn hierarchically. To begin describing the processes underlying the shape and distribution of these clusters, it might make the most sense to explore clusters hierarchically while approaching those points that are outliers in density with a different set of questions--often, exploring why events might occur in a clustered fashion is enriched by determining which events do not.
+
+## Speaking Event Data, 1870 to 1871
+
+\
+Our data set from 1870 to 1871 contained far fewer points (*n*=50), yet this general pattern detected with density-based clustering was repeated with that set.  The other clustering methods were not so useful with such a small sample size.
+**n=50, analyses are identical but power of inference is much lower**
+```{r 1871_allCode,warning=FALSE,message=FALSE,collapse=FALSE}
+#get data
+speaks=read.csv("1871.csv")
+sp1871=data.frame(
+  dateSpeak=as.Date(speaks$Speak_Date,format="%d.%m.%Y"),
+  lat=speaks$Ship_Latitude,
+  long=speaks$Ship_Longitude)
+sp1871=na.omit(sp1871) #remove all with missing data
+
+#convert to spatial
+coords=cbind(lon=sp1871[,'long'],lat=sp1871[,'lat'])
+samplesSPxy=SpatialPointsDataFrame(coords,data=sp1871,
+                                   proj4string=CRS("+init=epsg:4326"))
+world=getMap()
+
+#reproject to planar coordinates
+world.xy=spTransform(world,CRS(proj4string(samplesSPxy)))
+samplesSP=spTransform(samplesSPxy, CRS("+init=epsg:32663"))
+
+world.sp=spTransform(world,CRS(proj4string(samplesSP)))
+plot(world.sp,col='dark gray',border=FALSE)
+points(samplesSP,col='dark red',pch=16,cex=0.5)
+
+#transform to spatial point pattern
+samplesPPP=as(samplesSP,"ppp")
+
+#####tests for complete spatial randomness (CSR):
+basicCSR=envelope(unmark(as.ppp(samplesPPP)),
+                  fun=Kest,nsim=99,
+                  savepatterns=TRUE,
+                  do.pwrong=TRUE,
+                  fix.n=TRUE,verbose=FALSE)
+
+summary(basicCSR)
+plot(basicCSR,main='Kest')
+#^^^estimates K function for the spatial distribution of our samples
+
+#goodness-of-fit test:
+madCSR=mad.test(basicCSR)
+madCSR # p-value = 0.01
+
+#The F-function essentially measures the average space
+#BETWEEN events:
+basicCSR.F=envelope(unmark(as.ppp(samplesPPP)),fun='Fest',
+                    nsim=99,savepatterns=TRUE,do.pwrong=TRUE,
+                    fix.n=TRUE,verbose=FALSE)
+plot(basicCSR.F,main='Fest')
+
+#pcf='pair correlation function," it's a measure of
+#the point density within rings of radius r
+pcf=pcf(unmark(as.ppp(samplesPPP)))
+plot(pcf)
+#g(r)>1 indicates more points than expected at
+#specified distance class
+
+#data points that are distributed
+#with an unknown spatially varying intensity function
+#will fail tests of CSR--however, this doesn't
+#mean that those points necessarily show "clustering"
+K.HP=Kinhom(unmark(as.ppp(samplesPPP)))
+pcf.HP=pcf(K.HP,method='c',spar=0.5)
+
+plot(pcf.HP,xlim=c(0,50000))
+#the detected departure from CSR
+#still holds when we allow density
+#to vary systematically across the sample area
+
+#HOTSPOT ANALYSIS WITH KERNEL SMOOTHING
+xy_points=coordinates(samplesSPxy)
+b2=Hpi(xy_points,binned=TRUE,pilot='samse',pre='scale')
+#estimate optimal bandwidth
+
+kernSmooth.kde=kde(xy_points,
+                   H=b2,
+                   gridsize=c(400,400),
+                   compute.cont=TRUE)
+#kernel density estimate with fixed bandwidth
+
+#transform kde object to raster and clean up 
+worldR=raster(nrows=900,ncols=900)
+worldR=rasterize(spTransform(world.xy,CRS(proj4string(worldR))),
+                 worldR,field='LEVEL',fun='sum')
+worldR=projectRaster(worldR,crs=CRS(proj4string(world.xy)))
+worldR[is.na(worldR)]=1
+worldR[worldR>1]=NA
+
+grid.kde=raster(kernSmooth.kde)
+proj4string(grid.kde)=proj4string(worldR)
+grid.kde=extend(grid.kde,worldR,value=0)
+plot(world.xy,col='dark gray',border=FALSE)
+plot(grid.kde,col=rev(heat.colors(15,alpha=1)),
+     legend=FALSE,xlab='',ylab='',
+     legend.shrink=0.45,
+     box=FALSE,add=TRUE,
+     legend.args=list(text='',
+                      side=1,font=2,line=3.5,cex=0.7))
+plot(world.xy,col='dark gray',border=FALSE,add=TRUE)
+title(main='Point Intensity, 1870 to 1871',line=1,cex=0.75)
+
+#K-Means Clustering
+#algorithmically choose the optimal value of k:
+
+#The location of a bend (knee) in the plot is considered  
+#an indicator of the appropriate number of clusters.
+#k-means process works to minimize mean squared error
+#I would say k=5, that's really where any further
+#increase of k stops reducing SoS (note the flat line
+#from k=5 to k=7)
+fviz_nbclust(coordinates(samplesSP),kmeans,method="wss",k.max=20) +
+  geom_vline(xintercept=5,linetype=2) 
+
+#it's a bit ambiguous, so we'll try multiple methods:
+fviz_nbclust(coordinates(samplesSP),kmeans,method="silhouette",k.max=20)
+#The optimal number of clusters k is the one that maximize 
+#the average silhouette over a range of possible values for k
+#suggests 6, but it's limited improvement over 5
+
+km.1871=kmeans(coordinates(samplesSP),5,nstart=500,iter.max=999)
+km.1871$size #pretty big variation in cluster size
+samplesSP$kMean5=km.1871$cluster
+plot(world.sp,col='dark gray',border=FALSE,
+     main='Spatial Clusters, 1870 to 1871',
+     sub='K-Means with k=5')
+points(samplesSP,col=samplesSP$kMean5,pch=16,cex=0.5)
+#still finds some obvious clusters, though!
+
+#hierarchical clustering--another way to locate
+#hotspots
+
+#begins by assigning each individual to its own cluster
+#at each step, the two clusters that are the most similar
+#are merged; algorithm continues until all clusters
+#left are too dissimilar to justify merging
+euc.Dists=dist(coordinates(samplesSP),method='euclidean')
+fitward=hclust(euc.Dists,method='complete')
+hcd=as.dendrogram(fitward)
+
+#Coph correlation
+coph=cophenetic(fitward)
+cor(euc.Dists,coph) #0.8143261 good
+
+#algorithm to find clusters
+dynamoTree=cutreeHybrid(dendro=fitward,
+                        distM=as.matrix(euc.Dists),
+                        verbose=FALSE) #detect clusters
+
+unique(dynamoTree$labels) #chooses 1 cluster
+
+#Show the clusters on the tree:
+samplesSP$hierarch=dynamoTree$labels
+dendro.cols2=samplesSP$hierarch[fitward[['order']]]
+dendro.cols2=palette()[dendro.cols2] #showing the cuts on a dendrogram
+hcd.hier=as.dendrogram(fitward)
+labels_colors(hcd.hier)=dendro.cols2
+plot(hcd.hier) #nothing to see here!
+
+#Plot the cluster assignments in space:
+plot(world.sp,col='dark gray',border=FALSE,
+     main='Spatial Clusters, 1870 to 1871',
+     sub='Hierarchical Clustering, k=6')
+points(samplesSP,col=samplesSP$hierarch,pch=16,cex=0.5)
+
+#Let's see if density scanning picks up anything...
+kNNdistplot(euc.Dists,k=5) #locate optimal neighborhood size for a given value of k
+abline(h=2000000,lty=2)
+
+dbscan1=dbscan(euc.Dists,eps=2000000,minPts=2)
+dbscan1 #finds 5 clusters
+#at a 2000km neighborhood size
+plot(world.sp,col='dark gray',border=FALSE,
+     main='Spatial Clusters, 1870 to 1871',
+     sub='Density-based Clustering, Eps=2000km, MinPts=2')
+points(samplesSP,col=dbscan1$cluster+8,pch=16,cex=0.5)
+
+#these clusters still make sense for shipping communication events
+```
+Our data set from 1870 to 1871 contained far fewer points (*n*=50), yet this general pattern detected with density-based clustering was repeated with that set.  The other clustering methods were not so useful with such a small sample size.
+
+
+
